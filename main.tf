@@ -6,11 +6,7 @@ data "aws_availability_zones" "available" {
   }
 }
 
-resource "aws_service_discovery_http_namespace" "this" {
-  name        = local.name
-  description = "CloudMap namespace for ${local.name}"
 
-}
 
 locals {
   name   = "ex-${basename(path.cwd)}"
@@ -18,7 +14,18 @@ locals {
 
   vpc_cidr = "10.0.0.0/16"
   azs      = slice(data.aws_availability_zones.available.names, 0, 3)
-  
+
+
+  container_name = "ecs-sample"
+  container_port = 80
+  container_image = "public.ecr.aws/aws-containers/ecsdemo-frontend:776fd50"
+
+  tags = {
+    Name       = local.name
+    Example    = local.name
+    Repository = "https://github.com/terraform-aws-modules/terraform-aws-ecs"
+  }
+
 }
 
 module "vpc" {
@@ -48,9 +55,7 @@ module "vpc" {
 
 }
 
-resource "aws_security_group" "service_security_group" {
-  vpc_id      = module.vpc.vpc_id
-}
+
 
 module "ecs" {
   source = "terraform-aws-modules/ecs/aws"
@@ -80,7 +85,7 @@ module "ecs" {
   }
 
   services = {
-    ecsdemo-frontend = {
+    (local.name) = {
       cpu    = 1024
       memory = 4096
 
@@ -98,15 +103,15 @@ module "ecs" {
           memory_reservation = 50
         }
 
-        ecs-sample = {
+        (local.container_name) = {
           cpu       = 512
           memory    = 1024
           essential = true
-          image     = "public.ecr.aws/aws-containers/ecsdemo-frontend:776fd50"
+          image     = local.container_image
           port_mappings = [
             {
-              name          = "ecs-sample"
-              containerPort = 80
+              name          = local.container_name
+              containerPort = local.container_port
               protocol      = "tcp"
             }
           ]
@@ -124,7 +129,7 @@ module "ecs" {
             logDriver = "awsfirelens"
             options = {
               Name                    = "firehose"
-              region                  = "eu-west-1"
+              region                  = local.region
               delivery_stream         = "my-stream"
               log-driver-buffer-limit = "2097152"
             }
@@ -137,11 +142,19 @@ module "ecs" {
         namespace = aws_service_discovery_http_namespace.this.arn
         service = {
           client_alias = {
-            port     = 80
-            dns_name = "ecs-sample"
+            port     = local.container_port
+            dns_name = local.container_name
           }
-          port_name      = "ecs-sample"
-          discovery_name = "ecs-sample"
+          port_name      = local.container_name
+          discovery_name = local.container_name
+        }
+      }
+
+      load_balancer = {
+        service = {
+        target_group_arn = module.alb.target_groups["ex_ecs"].arn
+        container_name   = local.container_name
+        container_port   = local.container_port
         }
       }
 
@@ -149,11 +162,11 @@ module "ecs" {
       security_group_rules = {
         alb_ingress_3000 = {
           type                     = "ingress"
-          from_port                = 80
-          to_port                  = 80
+          from_port                = local.container_port
+          to_port                  = local.container_port
           protocol                 = "tcp"
           description              = "Service port"
-          source_security_group_id = aws_security_group.service_security_group.id
+          source_security_group_id = module.alb.security_group_id
         }
         egress_all = {
           type        = "egress"
@@ -165,9 +178,81 @@ module "ecs" {
       }
     }
   }
+  tags = local.tags
+}
 
-  tags = {
-    Environment = "Development"
-    Project     = "Example"
+resource "aws_service_discovery_http_namespace" "this" {
+  name        = local.name
+  description = "CloudMap namespace for ${local.name}"
+
+}
+
+module "alb" {
+  source  = "terraform-aws-modules/alb/aws"
+  version = "~> 9.0"
+
+  name = local.name
+
+  load_balancer_type = "application"
+
+  vpc_id  = module.vpc.vpc_id
+  subnets = module.vpc.public_subnets
+
+  # For example only
+  enable_deletion_protection = false
+
+  # Security Group
+  security_group_ingress_rules = {
+    all_http = {
+      from_port   = 80
+      to_port     = 80
+      ip_protocol = "tcp"
+      cidr_ipv4   = "0.0.0.0/0"
+    }
   }
+  security_group_egress_rules = {
+    all = {
+      ip_protocol = "-1"
+      cidr_ipv4   = module.vpc.vpc_cidr_block
+    }
+  }
+
+  listeners = {
+    ex_http = {
+      port     = 80
+      protocol = "HTTP"
+
+      forward = {
+        target_group_key = "ex_ecs"
+      }
+    }
+  }
+
+  target_groups = {
+    ex_ecs = {
+      backend_protocol                  = "HTTP"
+      backend_port                      = local.container_port
+      target_type                       = "ip"
+      deregistration_delay              = 5
+      load_balancing_cross_zone_enabled = true
+
+      health_check = {
+        enabled             = true
+        healthy_threshold   = 5
+        interval            = 30
+        matcher             = "200"
+        path                = "/"
+        port                = "traffic-port"
+        protocol            = "HTTP"
+        timeout             = 5
+        unhealthy_threshold = 2
+      }
+
+      # There's nothing to attach here in this definition. Instead,
+      # ECS will attach the IPs of the tasks to this target group
+      create_attachment = false
+    }
+  }
+
+  tags = local.tags
 }
