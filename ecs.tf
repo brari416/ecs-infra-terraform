@@ -1,7 +1,7 @@
 module "ecs" {
   source = "terraform-aws-modules/ecs/aws"
 
-  cluster_name = "ecs-integrated"
+  cluster_name = "ecs-exemple"
 
   cluster_configuration = {
     execute_command_configuration = {
